@@ -13,12 +13,9 @@ import { useOnboardingEvent } from '../hooks/use-onboarding-event';
 import { useUpdateChoices } from '../hooks/use-update-choices';
 import { useUpdateProgress } from '../hooks/use-update-progress';
 import { useVideoPreload } from '../hooks/use-video-preload';
-import { BuildingFor } from '../steps/screens/building-for';
-import { ExperienceLevel } from '../steps/screens/experience-level';
 import { Login } from '../steps/screens/login';
 import { ProInstall } from '../steps/screens/pro-install';
-import { SiteAbout } from '../steps/screens/site-about';
-import { SiteFeatures } from '../steps/screens/site-features';
+import { HELLO_THEME_FEATURE_ID, SiteFeatures } from '../steps/screens/site-features';
 import { ThemeSelection } from '../steps/screens/theme-selection';
 import { getStepVisualConfig } from '../steps/step-visuals';
 import { StepId } from '../types';
@@ -92,6 +89,7 @@ export function AppContent( { onClose }: AppContentProps ) {
 		trackUpgradeClicked,
 		trackResumeOnboarding,
 		trackSummary,
+		trackThemeSelected,
 		trackErrorReported,
 		activateTracking,
 		flushQueue,
@@ -301,6 +299,27 @@ export function AppContent( { onClose }: AppContentProps ) {
 		[ updateChoices ]
 	);
 
+	const installHelloThemeIfSelected = useCallback(
+		async ( selectedIds: string[] ): Promise< void > => {
+			if ( ! selectedIds.includes( HELLO_THEME_FEATURE_ID ) ) {
+				return;
+			}
+
+			try {
+				await installTheme.mutateAsync( 'hello-elementor' );
+			} catch ( error ) {
+				trackErrorReported( {
+					targetType: 'install',
+					targetName: 'install_hello_theme',
+					stepId: 'site_features',
+					errorBody: error instanceof Error ? error.message : 'Failed to install Hello theme',
+				} );
+				showToast( t( 'error.theme_install_failed' ) );
+			}
+		},
+		[ installTheme, trackErrorReported, showToast ]
+	);
+
 	const handleContinue = useCallback(
 		( directChoice?: Record< string, unknown > ) => {
 			if ( stepId === StepId.SITE_FEATURES ) {
@@ -310,17 +329,46 @@ export function AppContent( { onClose }: AppContentProps ) {
 				} );
 			}
 
+			let effectiveDirectChoice = directChoice;
+
+			if ( stepId === StepId.THEME_SELECTION && ! effectiveDirectChoice ) {
+				effectiveDirectChoice = { theme_selection: 'hello-elementor' };
+			}
+
 			const storedChoice = choices[ stepId as keyof typeof choices ];
-			const choiceData = directChoice ?? ( isChoiceEmpty( storedChoice ) ? null : { [ stepId ]: storedChoice } );
+			const choiceData =
+				effectiveDirectChoice ?? ( isChoiceEmpty( storedChoice ) ? null : { [ stepId ]: storedChoice } );
 
 			if ( choiceData ) {
 				saveChoicesFireAndForget( choiceData );
 			}
 
+			if ( stepId === StepId.SITE_FEATURES && isLast ) {
+				const selectedFeatures = ( choices.site_features as string[] ) || [];
+				const hasHelloSelected = selectedFeatures.includes( HELLO_THEME_FEATURE_ID );
+
+				if ( hasHelloSelected ) {
+					trackThemeSelected( 'hello-elementor', 'site_features' );
+					trackSummary( {
+						choices,
+						completedSteps: [ ...completedSteps, stepId ],
+						isConnected,
+						isGuest,
+					} );
+					isCompletingRef.current = true;
+					setIsCompleting( true );
+					installHelloThemeIfSelected( selectedFeatures ).finally( completeAndRedirect );
+					return;
+				}
+			}
+
 			if ( stepId === StepId.THEME_SELECTION ) {
-				const themeSlug = ( choiceData?.theme_selection ?? choices.theme_selection ) as string;
+				const themeSlug = ( choiceData?.theme_selection ??
+					choices.theme_selection ??
+					'hello-elementor' ) as string;
 
 				if ( themeSlug && isLast ) {
+					trackThemeSelected( themeSlug, 'theme_selection' );
 					isCompletingRef.current = true;
 					setIsCompleting( true );
 					installTheme.mutate( themeSlug, {
@@ -328,7 +376,7 @@ export function AppContent( { onClose }: AppContentProps ) {
 						onError: ( error ) => {
 							trackErrorReported( {
 								targetType: 'install',
-								targetName: 'continue_with_this_theme',
+								targetName: 'continue_with_hello',
 								stepId: 'theme_selection',
 								errorBody: error instanceof Error ? error.message : 'Failed to install theme',
 							} );
@@ -340,11 +388,12 @@ export function AppContent( { onClose }: AppContentProps ) {
 				}
 
 				if ( themeSlug ) {
+					trackThemeSelected( themeSlug, 'theme_selection' );
 					installTheme.mutate( themeSlug, {
 						onError: ( error ) => {
 							trackErrorReported( {
 								targetType: 'install',
-								targetName: 'continue_with_this_theme',
+								targetName: 'continue_with_hello',
 								stepId: 'theme_selection',
 								errorBody: error instanceof Error ? error.message : 'Failed to install theme',
 							} );
@@ -398,11 +447,13 @@ export function AppContent( { onClose }: AppContentProps ) {
 			updateProgress,
 			saveChoicesFireAndForget,
 			installTheme,
+			installHelloThemeIfSelected,
 			showToast,
 			completeAndRedirect,
 			trackErrorReported,
 			trackProFeaturesSelected,
 			trackSummary,
+			trackThemeSelected,
 		]
 	);
 
@@ -415,7 +466,7 @@ export function AppContent( { onClose }: AppContentProps ) {
 
 	const getContinueLabel = () => {
 		if ( stepId === StepId.THEME_SELECTION && ! completedSteps.includes( StepId.THEME_SELECTION ) ) {
-			return t( 'steps.theme_selection.continue_with_theme' );
+			return t( 'steps.theme_selection.v2.continue_with_theme' );
 		}
 
 		if ( stepId === StepId.SITE_FEATURES && ! completedSteps.includes( StepId.SITE_FEATURES ) ) {
@@ -431,14 +482,8 @@ export function AppContent( { onClose }: AppContentProps ) {
 
 	const renderStepContent = () => {
 		switch ( stepId ) {
-			case StepId.BUILDING_FOR:
-				return <BuildingFor onComplete={ handleContinue } />;
-			case StepId.SITE_ABOUT:
-				return <SiteAbout />;
-			case StepId.EXPERIENCE_LEVEL:
-				return <ExperienceLevel onComplete={ handleContinue } />;
 			case StepId.THEME_SELECTION:
-				return <ThemeSelection onComplete={ handleContinue } />;
+				return <ThemeSelection />;
 			case StepId.SITE_FEATURES:
 				return <SiteFeatures />;
 			default:
@@ -455,7 +500,14 @@ export function AppContent( { onClose }: AppContentProps ) {
 			<BaseLayout
 				topBar={
 					<TopBar>
-						<TopBarContent showUpgrade={ false } showClose={ false } />
+						<TopBarContent
+							showUpgrade
+							showClose={ false }
+							onUpgrade={ () => {
+								trackUpgradeClicked( 'login' );
+								window.open( urls.upgradeUrl, '_blank' );
+							} }
+						/>
 					</TopBar>
 				}
 			>
@@ -514,11 +566,7 @@ export function AppContent( { onClose }: AppContentProps ) {
 				</Footer>
 			}
 		>
-			<SplitLayout
-				left={ renderStepContent() }
-				rightConfig={ rightPanelConfig }
-				progress={ { currentStep: stepIndex, totalSteps } }
-			/>
+			<SplitLayout left={ renderStepContent() } rightConfig={ rightPanelConfig } />
 		</BaseLayout>
 	);
 }

@@ -243,6 +243,58 @@ class Document_Mutator_Test extends TestCase {
 		$this->assertWPError( $result, 'elementor_invalid_parent' );
 	}
 
+	// build_ref_index
+
+	public function test_build_ref_index_returns_by_reference_index_for_nested_node() {
+		$widget = $this->make_widget( 'w1' );
+		$tree   = [ $this->make_container( 'c1', [ $widget ] ) ];
+
+		$index = $this->mutator->build_ref_index( $tree, 'w1' );
+
+		$this->assertArrayHasKey( 'w1', $index );
+		$index['w1']['settings']['title'] = 'edited';
+		$this->assertSame( 'edited', $tree[0]['elements'][0]['settings']['title'] );
+	}
+
+	public function test_build_ref_index_returns_empty_when_absent() {
+		$tree = [ $this->make_container( 'c1' ) ];
+
+		$this->assertSame( [], $this->mutator->build_ref_index( $tree, 'ghost' ) );
+	}
+
+	// duplicate
+
+	public function test_duplicate_inserts_clone_after_source_with_fresh_ids() {
+		$widget = $this->make_widget( 'w1' );
+		$tree   = [ $this->make_container( 'c1', [ $widget ] ) ];
+
+		$result = $this->mutator->duplicate( $tree, 'w1' );
+
+		$this->assertCount( 2, $result[0]['elements'] );
+		$this->assertSame( 'w1', $result[0]['elements'][0]['id'] );
+		$this->assertNotSame( 'w1', $result[0]['elements'][1]['id'] );
+		$this->assertSame( 'text-editor', $result[0]['elements'][1]['widgetType'] );
+	}
+
+	public function test_duplicate_regenerates_ids_of_all_descendants() {
+		$inner = $this->make_widget( 'w1' );
+		$tree  = [ $this->make_container( 'c1', [ $inner ] ) ];
+
+		$result = $this->mutator->duplicate( $tree, 'c1' );
+
+		$this->assertCount( 2, $result );
+		$this->assertNotSame( 'c1', $result[1]['id'] );
+		$this->assertNotSame( 'w1', $result[1]['elements'][0]['id'] );
+	}
+
+	public function test_duplicate_absent_id_returns_not_found_error() {
+		$tree = [ $this->make_container( 'c1' ) ];
+
+		$result = $this->mutator->duplicate( $tree, 'ghost' );
+
+		$this->assertWPError( $result, 'elementor_not_found' );
+	}
+
 	// child-type restrictions
 
 	public function test_insert_at_respects_allowed_child_types_when_restricted() {
@@ -306,6 +358,122 @@ class Document_Mutator_Test extends TestCase {
 
 		// Assert
 		$this->assertSame( $original, $tree );
+	}
+
+	// insert_subtree
+
+	public function test_insert_subtree_generates_ids_for_all_elements() {
+		// Arrange
+		$subtree = [
+			'elType' => 'container',
+			'settings' => [],
+			'elements' => [
+				[ 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => [], 'elements' => [] ],
+				[ 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => [], 'elements' => [] ],
+			],
+		];
+		$tree = [ $this->make_container( 'c1' ) ];
+
+		// Act
+		$result = $this->mutator->insert_subtree( $tree, 'document', null, $subtree );
+
+		// Assert
+		$this->assertIsArray( $result );
+		$this->assertCount( 2, $result );
+
+		$inserted = $result[1];
+		$this->assertNotEmpty( $inserted['id'] );
+		$this->assertNotEmpty( $inserted['elements'][0]['id'] );
+		$this->assertNotEmpty( $inserted['elements'][1]['id'] );
+
+		$this->assertNotEquals( $inserted['id'], $inserted['elements'][0]['id'] );
+		$this->assertNotEquals( $inserted['elements'][0]['id'], $inserted['elements'][1]['id'] );
+	}
+
+	public function test_insert_subtree_always_regenerates_ids() {
+		// Arrange
+		$subtree = [
+			'id' => 'my-custom-id',
+			'elType' => 'container',
+			'settings' => [],
+			'elements' => [
+				[ 'id' => 'child-1', 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => [], 'elements' => [] ],
+				[ 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => [], 'elements' => [] ],
+			],
+		];
+		$tree = [];
+
+		// Act
+		$result = $this->mutator->insert_subtree( $tree, 'document', null, $subtree );
+
+		// Assert - all IDs should be regenerated, never preserved
+		$inserted = $result[0];
+		$this->assertNotSame( 'my-custom-id', $inserted['id'] );
+		$this->assertNotEmpty( $inserted['id'] );
+		$this->assertNotSame( 'child-1', $inserted['elements'][0]['id'] );
+		$this->assertNotEmpty( $inserted['elements'][0]['id'] );
+		$this->assertNotEmpty( $inserted['elements'][1]['id'] );
+	}
+
+	public function test_insert_subtree_into_parent_container() {
+		// Arrange
+		$subtree = [
+			'elType' => 'widget',
+			'widgetType' => 'text-editor',
+			'settings' => [],
+			'elements' => [],
+		];
+		$tree = [ $this->make_container( 'c1' ) ];
+
+		// Act
+		$result = $this->mutator->insert_subtree( $tree, 'c1', null, $subtree );
+
+		// Assert
+		$this->assertIsArray( $result );
+		$this->assertCount( 1, $result[0]['elements'] );
+		$this->assertNotEmpty( $result[0]['elements'][0]['id'] );
+	}
+
+	public function test_insert_subtree_handles_deeply_nested_elements() {
+		// Arrange
+		$subtree = [
+			'elType' => 'container',
+			'settings' => [],
+			'elements' => [
+				[
+					'elType' => 'container',
+					'settings' => [],
+					'elements' => [
+						[
+							'elType' => 'container',
+							'settings' => [],
+							'elements' => [
+								[ 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => [], 'elements' => [] ],
+							],
+						],
+					],
+				],
+			],
+		];
+		$tree = [];
+
+		// Act
+		$result = $this->mutator->insert_subtree( $tree, 'document', null, $subtree );
+
+		// Assert
+		$inserted = $result[0];
+		$this->assertNotEmpty( $inserted['id'] );
+		$this->assertNotEmpty( $inserted['elements'][0]['id'] );
+		$this->assertNotEmpty( $inserted['elements'][0]['elements'][0]['id'] );
+		$this->assertNotEmpty( $inserted['elements'][0]['elements'][0]['elements'][0]['id'] );
+
+		$all_ids = [
+			$inserted['id'],
+			$inserted['elements'][0]['id'],
+			$inserted['elements'][0]['elements'][0]['id'],
+			$inserted['elements'][0]['elements'][0]['elements'][0]['id'],
+		];
+		$this->assertCount( 4, array_unique( $all_ids ) );
 	}
 
 	// Helpers

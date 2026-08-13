@@ -4,7 +4,9 @@ namespace Elementor\Modules\Mcp\RestApi;
 
 use Elementor\Core\Utils\Api\Error_Builder;
 use Elementor\Core\Utils\Api\Response_Builder;
-use Elementor\Modules\Mcp\Abilities\Create_Element_Ability;
+use Elementor\Modules\Mcp\Module as Mcp_Module;
+use Elementor\Modules\Mcp\Registry\Ability_Registry;
+use Elementor\Plugin;
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
@@ -14,12 +16,10 @@ class Mcp_Proxy_REST_API {
 	const API_NAMESPACE = 'elementor/v1';
 	const API_BASE      = 'mcp-proxy';
 
-	private array $tools = [];
+	private ?Ability_Registry $registry;
 
-	public function __construct() {
-		$this->tools = [
-			'create-element' => fn( array $input ) => ( new Create_Element_Ability() )->execute( $input ),
-		];
+	public function __construct( ?Ability_Registry $registry = null ) {
+		$this->registry = $registry;
 	}
 
 	public function register_hooks() {
@@ -30,15 +30,26 @@ class Mcp_Proxy_REST_API {
 		register_rest_route( self::API_NAMESPACE, '/' . self::API_BASE, [
 			[
 				'methods'             => 'POST',
-				'callback'            => fn( $request ) => $this->route_wrapper( fn() => $this->handle( $request ) ),
+				'callback'            => fn( $request ) => $this->route_wrapper( fn() => $this->handle_tool( $request ) ),
 				'permission_callback' => fn() => current_user_can( 'edit_posts' ),
 				'args'                => [
 					'tool'  => [
-						'type' => 'string',
+						'type'     => 'string',
 						'required' => true,
 					],
 					'input' => [
-						'type' => 'object',
+						'type'     => 'object',
+						'required' => true,
+					],
+				],
+			],
+			[
+				'methods'             => 'GET',
+				'callback'            => fn( $request ) => $this->route_wrapper( fn() => $this->handle_resource( $request ) ),
+				'permission_callback' => fn() => current_user_can( 'edit_posts' ),
+				'args'                => [
+					'uri' => [
+						'type'     => 'string',
 						'required' => true,
 					],
 				],
@@ -46,11 +57,13 @@ class Mcp_Proxy_REST_API {
 		] );
 	}
 
-	private function handle( \WP_REST_Request $request ) {
+	private function handle_tool( \WP_REST_Request $request ) {
 		$tool  = $request->get_param( 'tool' );
 		$input = $request->get_param( 'input' );
 
-		if ( ! isset( $this->tools[ $tool ] ) ) {
+		$ability = $this->resolve_registry()->find_by_proxy_slug( (string) $tool );
+
+		if ( null === $ability ) {
 			return Error_Builder::make( 'unknown_tool' )
 				->set_status( 404 )
 				// translators: By tool name
@@ -58,8 +71,60 @@ class Mcp_Proxy_REST_API {
 				->build();
 		}
 
-		$result = ( $this->tools[ $tool ] )( is_array( $input ) ? $input : [] );
+		if ( ! $ability->check_permission() ) {
+			return $this->build_response( $this->forbidden_error() );
+		}
 
+		$result = $ability->execute( is_array( $input ) ? $input : [] );
+
+		return $this->build_response( $result );
+	}
+
+	private function handle_resource( \WP_REST_Request $request ) {
+		$uri = $request->get_param( 'uri' );
+
+		$ability = $this->resolve_registry()->find_resource_by_uri( (string) $uri );
+
+		if ( null === $ability ) {
+			return Error_Builder::make( 'unknown_resource' )
+				->set_status( 404 )
+				// translators: By resource URI
+				->set_message( sprintf( __( 'Unknown resource: %s', 'elementor' ), $uri ) )
+				->build();
+		}
+
+		if ( ! $ability->check_permission() ) {
+			return $this->build_response( $this->forbidden_error() );
+		}
+
+		$result = $ability->execute();
+
+		return $this->build_response( $result );
+	}
+
+	private function resolve_registry(): Ability_Registry {
+		if ( $this->registry instanceof Ability_Registry ) {
+			return $this->registry;
+		}
+
+		$module = Plugin::$instance->modules_manager->get_modules( 'mcp' );
+
+		$this->registry = $module instanceof Mcp_Module
+			? $module->registry()
+			: Mcp_Module::build_core_registry();
+
+		return $this->registry;
+	}
+
+	private function forbidden_error(): \WP_Error {
+		return new \WP_Error(
+			'rest_forbidden',
+			__( 'Sorry, you are not allowed to perform this action.', 'elementor' ),
+			[ 'status' => \WP_Http::FORBIDDEN ]
+		);
+	}
+
+	private function build_response( $result ) {
 		if ( is_wp_error( $result ) ) {
 			$data   = $result->get_error_data();
 			$status = is_array( $data ) && isset( $data['status'] ) ? $data['status'] : 400;
@@ -70,7 +135,20 @@ class Mcp_Proxy_REST_API {
 				->build();
 		}
 
-		return Response_Builder::make( $result )->build();
+		$http_status = $this->resolve_http_status( $result );
+
+		return Response_Builder::make( $result )->set_status( $http_status )->build();
+	}
+
+	private function resolve_http_status( $result ): int {
+		$status = is_array( $result ) ? ( $result['status'] ?? 'ok' ) : 'ok';
+
+		$status_map = [
+			'error'         => 422,
+			'partial_error' => 207,
+		];
+
+		return $status_map[ $status ] ?? 200;
 	}
 
 	private function route_wrapper( callable $cb ) {
